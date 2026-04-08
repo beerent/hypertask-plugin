@@ -26,18 +26,34 @@ by the hypertask-peek hook on each user turn. When you see one:
    - skip / not now.
    Do not claim until they confirm.
 
-4. **Claim atomically.** When the user says yes, POST to
-   `$HYPERTASK_URL/api/local/<dispatch_id>/claim` with body
-   `{"sessionId": "<your CLAUDE_SESSION_ID>"}`. Use `$HYPERTASK_TOKEN` as a
-   bearer token. If you get HTTP 409, tell the user "looks like another window
-   already grabbed it" and continue with whatever you were doing. Do not retry.
+4. **Claim atomically.** When the user says yes, run exactly:
+
+   ```bash
+   curl -sS -X POST "$HYPERTASK_URL/api/local/<dispatch_id>/claim" \
+     -H "Authorization: Bearer $HYPERTASK_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"sessionId":"<session id from the reminder>"}'
+   ```
+
+   Both `$HYPERTASK_URL` and `$HYPERTASK_TOKEN` are already exported in the
+   shell that launched Claude Code — let the shell expand them; do not
+   hardcode the URL or embed the cleartext token. The `Authorization: Bearer`
+   header is **required** — without it the server returns 401 and the claim
+   silently fails.
+
+   If you get HTTP 409, tell the user "looks like another window already
+   grabbed it" and continue with whatever you were doing. Do not retry.
 
 5. **On a successful claim**, the response includes the full task payload
    (`{dispatch, task}` with `task.title`, etc.). Work the task as you would any
-   user-given task. When done, POST to
-   `$HYPERTASK_URL/api/local/<dispatch_id>/complete` with body
-   `{"status": "complete", "summary": "<one paragraph of what you did>"}`.
-   On failure, post `{"status": "failed", "summary": "<reason>"}`.
+   user-given task. When done, POST the same way to
+   `$HYPERTASK_URL/api/local/<dispatch_id>/complete` (same headers) with body:
+
+   ```json
+   {"status":"complete","summary":"<one paragraph of what you did>"}
+   ```
+
+   On failure, post `{"status":"failed","summary":"<reason>"}`.
 
 6. **If the user says skip/not now**, do nothing. The hook will not re-announce
    this dispatch in the current session. To revisit later, the user can ask

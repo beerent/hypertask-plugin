@@ -10,11 +10,39 @@ set -u
 exit_clean() { exit 0; }
 trap exit_clean ERR
 
+# --- Read Claude Code hook input from stdin ---
+# Claude Code passes a JSON object to UserPromptSubmit hooks on stdin
+# containing at minimum: { session_id, transcript_path, cwd,
+# hook_event_name, prompt }. We extract session_id and cwd from there.
+# When the hook is run manually (e.g. `bash hypertask-peek.sh` from a
+# terminal for debugging), stdin is a terminal and we fall back to env
+# vars or defaults.
+HOOK_INPUT=""
+if ! [ -t 0 ]; then
+  HOOK_INPUT=$(cat 2>/dev/null || true)
+fi
+
 # --- config ---
 : "${HYPERTASK_TOKEN:=}"
 : "${HYPERTASK_URL:=https://hypertask.app}"
-: "${CLAUDE_PROJECT_DIR:=$PWD}"
+
+# Resolve the real session id + working dir, preferring stdin JSON over
+# env vars. This is critical for two reasons:
+#   1. Multi-window dedup — each Claude window gets its own session id,
+#      so the per-session announce-state file is distinct per window.
+#      Without this, every window shares announced-default.json and a
+#      task announced in Window A would be silently deduped in Window B.
+#   2. Claim tracking — the sessionId Claude sends on claim becomes
+#      claimedBy in the DB, which is how the server knows which window
+#      to attribute ownership to. "default" everywhere is useless.
+if [ -n "$HOOK_INPUT" ] && command -v jq >/dev/null 2>&1; then
+  _sid=$(echo "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)
+  [ -n "$_sid" ] && CLAUDE_SESSION_ID="$_sid"
+  _cwd=$(echo "$HOOK_INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)
+  [ -n "$_cwd" ] && CLAUDE_PROJECT_DIR="$_cwd"
+fi
 : "${CLAUDE_SESSION_ID:=default}"
+: "${CLAUDE_PROJECT_DIR:=$PWD}"
 
 [ -z "$HYPERTASK_TOKEN" ] && exit 0
 
@@ -89,6 +117,13 @@ Run: /plugin marketplace update hypertask"
 fi
 
 # Print the system reminder.
+# We emit an explicit curl template (with the Authorization header) rather
+# than describing the API abstractly, because without the header Claude's
+# first claim call 401s and has to retry — a wasted round-trip the user
+# sees as a broken "first attempt." $HYPERTASK_URL and $HYPERTASK_TOKEN
+# are escaped as literal shell-variable references so Claude runs them
+# through its own shell at curl time (both are already exported in the
+# shell that launched Claude Code).
 TITLES=$(echo "$NEW" | jq -r '.[] | "  - \"\(.title)\" (dispatch_id: \(.id))"')
 cat <<EOF
 <system-reminder>
@@ -98,9 +133,17 @@ $UPDATE_NAG
 
 Per the task-studio skill, offer to pick these up — but ONLY after you finish
 whatever the user is currently asking about. Never abandon in-progress work.
-To claim one, POST to $HYPERTASK_URL/api/local/<dispatch_id>/claim with body
-{"sessionId": "$CLAUDE_SESSION_ID"}. On success you receive the full task
-payload. When done, POST to /complete with {"status": "complete", "summary": "..."}.
+
+To claim a task, run:
+  curl -sS -X POST "\$HYPERTASK_URL/api/local/<dispatch_id>/claim" \\
+    -H "Authorization: Bearer \$HYPERTASK_TOKEN" \\
+    -H "Content-Type: application/json" \\
+    -d '{"sessionId":"$CLAUDE_SESSION_ID"}'
+
+On success the response body is {dispatch, task} with the full task payload.
+When done, POST the same way to .../complete with body:
+  {"status":"complete","summary":"<one paragraph of what you did>"}
+On failure: {"status":"failed","summary":"<reason>"}.
 </system-reminder>
 EOF
 exit 0
