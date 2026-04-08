@@ -1,0 +1,16 @@
+{
+  "description": "hypertask-local: surface queued tasks on prompt submit",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/hypertask-peek.sh",
+            "timeout": 2
+          }
+        ]
+      }
+    ]
+  }
+}

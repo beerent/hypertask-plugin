@@ -1,0 +1,20 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "hypertask",
+  "description": "Claude Code plugins for hypertask.app",
+  "owner": {
+    "name": "hypertask"
+  },
+  "plugins": [
+    {
+      "name": "hypertask-local",
+      "description": "Surface tasks queued from hypertask.app in your local Claude Code session.",
+      "author": {
+        "name": "hypertask"
+      },
+      "source": "./plugins/hypertask-local",
+      "category": "productivity",
+      "homepage": "https://hypertask.app"
+    }
+  ]
+}
