@@ -7,7 +7,7 @@ A Claude Code plugin that surfaces tasks queued from the hypertask.app web UI in
 The recommended install path is through the hypertask web UI — visit **Settings → Connect Claude Code** on hypertask.app for step-by-step instructions with your personal API key pre-filled. If you prefer to install by hand:
 
 ```
-/plugin marketplace add hypertask
+/plugin marketplace add beerent/hypertask-plugin
 /plugin install hypertask-local
 ```
 
