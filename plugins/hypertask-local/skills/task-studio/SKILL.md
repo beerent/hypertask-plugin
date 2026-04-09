@@ -10,16 +10,29 @@ by the hypertask-peek hook on each user turn. When you see one:
 
 ## Hard rules
 
-0. **Always work in a fresh git worktree for code-modifying tasks.** When you claim a task that involves modifying files in the current repo, create a new worktree BEFORE touching anything:
+0. **Always work in a fresh git worktree for code-modifying tasks.** The claim response includes a `previousDispatch` field. If it's `null`, this is a fresh attempt: create a brand-new branch. If it's set (an iteration on prior work), reuse the existing branch in a new worktree with an incremented attempt number:
 
    ```bash
    TASK_ID="<id from claim response>"
    SHORT=$(echo "$TASK_ID" | cut -c1-6)
-   SLUG=$(echo "<task title>" | tr '[:upper:] ' '[:lower:]-' | sed 's/[^a-z0-9-]//g' | cut -c1-40)
-   BRANCH="claude/${SLUG}-${SHORT}"
-   WORKTREE=".worktrees/claude-${SHORT}"
-   git worktree add -b "$BRANCH" "$WORKTREE"
-   cd "$WORKTREE"
+   NEW_ATTEMPT="<dispatch.attemptNumber from claim response>"
+
+   if [ -n "$PREVIOUS_BRANCH" ]; then
+     # Iteration — reuse the existing branch.
+     BRANCH="$PREVIOUS_BRANCH"          # from previousDispatch.branchName
+     WORKTREE=".worktrees/claude-${SHORT}-${NEW_ATTEMPT}"
+     git fetch origin "$BRANCH"
+     git worktree add "$WORKTREE" "$BRANCH"
+     cd "$WORKTREE"
+     git pull origin "$BRANCH"
+   else
+     # Fresh attempt — new branch.
+     SLUG=$(echo "<task title>" | tr '[:upper:] ' '[:lower:]-' | sed 's/[^a-z0-9-]//g' | cut -c1-40)
+     BRANCH="claude/${SLUG}-${SHORT}"
+     WORKTREE=".worktrees/claude-${SHORT}-1"
+     git worktree add -b "$BRANCH" "$WORKTREE"
+     cd "$WORKTREE"
+   fi
    ```
 
    All file edits, test runs, and commits happen inside the worktree. The main worktree is sacrosanct — NEVER modify files outside the worktree you created. When complete, include the branch name and worktree path in your completion payload.
@@ -74,6 +87,38 @@ by the hypertask-peek hook on each user turn. When you see one:
    If the push fails (no network, no remote, permission denied), surface the error to the user and still POST `/complete` with branch info — the server will log the PR-open failure and fall back to the manual Approve/Reject review card so nothing is lost.
 
    **On failure**, post `{"status":"failed","summary":"<reason>"}` (branch/worktree fields are optional when failing).
+
+5.5. **Iterate on PR feedback.** When you see a `hypertask: N task(s) with new PR feedback waiting` block, offer to iterate — but only after you finish whatever the user is currently asking about. On consent:
+
+   1. Re-claim the task (same POST as always). The response includes `previousDispatch` — use it per Rule 0 to reuse the branch in a new worktree with an incremented attempt number.
+   2. Fetch the feedback BEFORE touching code:
+
+      ```bash
+      curl -sS "$HYPERTASK_URL/api/local/tasks/<task_id>/pr-feedback" \
+        -H "Authorization: Bearer $HYPERTASK_TOKEN"
+      ```
+
+   3. Read the JSON. It has three arrays:
+      - `reviews` — submitted reviews with top-level bodies (Approve / Request changes / Comment)
+      - `reviewComments` — inline line-by-line code comments with `path`, `line`, `body`, `diffHunk`
+      - `issueComments` — general PR-thread discussion
+
+      Respond to every actionable item across all three.
+   4. Make the changes inside the new worktree, run tests, commit.
+   5. Push the existing branch (already tracked — no `-u`):
+
+      ```bash
+      git push origin "$BRANCH"
+      ```
+
+   6. POST to `/iterated` so peek stops nagging about this feedback:
+
+      ```bash
+      curl -sS -X POST "$HYPERTASK_URL/api/local/tasks/<task_id>/iterated" \
+        -H "Authorization: Bearer $HYPERTASK_TOKEN"
+      ```
+
+   **Do NOT call `/complete`.** The task is already in Review. Your push updates the existing PR — the reviewer sees the new commits and can approve or leave more comments. Only call `/complete` if you've explicitly abandoned this attempt (rare).
 
 6. **If the user says skip/not now**, do nothing. The hook will not re-announce
    this dispatch in the current session. To revisit later, the user can ask

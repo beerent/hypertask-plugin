@@ -97,10 +97,6 @@ RESPONSE=$(curl -sS --max-time 1 \
 COUNT=$(echo "$RESPONSE" | jq -r '.tasks | length' 2>/dev/null) || exit 0
 LATEST_VERSION=$(echo "$RESPONSE" | jq -r '.latestPluginVersion // empty' 2>/dev/null || echo "")
 
-if [ "$COUNT" = "0" ] || [ -z "$COUNT" ]; then
-  exit 0
-fi
-
 # --- announce state ---
 STATE_DIR="$HOME/.claude/hypertask"
 mkdir -p "$STATE_DIR" 2>/dev/null || exit 0
@@ -116,20 +112,54 @@ fi
 # best-effort delete them so the state dir doesn't accumulate garbage.
 rm -f "$STATE_DIR"/cleaned-*.json 2>/dev/null || true
 
-NEW=$(jq --slurpfile seen "$ANNOUNCED_FILE" \
-  '.tasks | map(select(
-    .id as $id
-    | .updatedAt as $u
-    | ($seen[0][$id] // "") < $u
-  ))' <<<"$RESPONSE")
+NEW="[]"
+NEW_COUNT=0
+if [ -n "$COUNT" ] && [ "$COUNT" != "0" ]; then
+  NEW=$(jq --slurpfile seen "$ANNOUNCED_FILE" \
+    '.tasks | map(select(
+      .id as $id
+      | .updatedAt as $u
+      | ($seen[0][$id] // "") < $u
+    ))' <<<"$RESPONSE")
+  NEW_COUNT=$(echo "$NEW" | jq 'length')
+  if [ "$NEW_COUNT" != "0" ]; then
+    jq --argjson new "$NEW" \
+      '. + ($new | map({(.id): .updatedAt}) | add)' \
+      "$ANNOUNCED_FILE" > "$ANNOUNCED_FILE.tmp" && \
+      mv "$ANNOUNCED_FILE.tmp" "$ANNOUNCED_FILE"
+  fi
+fi
 
-NEW_COUNT=$(echo "$NEW" | jq 'length')
-[ "$NEW_COUNT" = "0" ] && exit 0
+# --- feedback dedupe (parallel to pending-tasks dedupe) ---
+FEEDBACK_COUNT=$(echo "$RESPONSE" | jq -r '.feedback // [] | length' 2>/dev/null || echo "0")
+NEW_FEEDBACK="[]"
+NEW_FEEDBACK_COUNT=0
+if [ -n "$FEEDBACK_COUNT" ] && [ "$FEEDBACK_COUNT" != "0" ]; then
+  FEEDBACK_FILE="$STATE_DIR/feedback-announced-$CLAUDE_SESSION_ID.json"
+  [ -f "$FEEDBACK_FILE" ] || echo "{}" > "$FEEDBACK_FILE"
+  FB_FIRST_CHAR=$(head -c 1 "$FEEDBACK_FILE" 2>/dev/null)
+  if [ "$FB_FIRST_CHAR" = "[" ]; then
+    echo "{}" > "$FEEDBACK_FILE"
+  fi
+  NEW_FEEDBACK=$(jq --slurpfile seen "$FEEDBACK_FILE" \
+    '.feedback | map(select(
+      .taskId as $id
+      | .lastFeedbackAt as $u
+      | ($seen[0][$id] // "") < $u
+    ))' <<<"$RESPONSE")
+  NEW_FEEDBACK_COUNT=$(echo "$NEW_FEEDBACK" | jq 'length')
+  if [ "$NEW_FEEDBACK_COUNT" != "0" ]; then
+    jq --argjson new "$NEW_FEEDBACK" \
+      '. + ($new | map({(.taskId): .lastFeedbackAt}) | add)' \
+      "$FEEDBACK_FILE" > "$FEEDBACK_FILE.tmp" && \
+      mv "$FEEDBACK_FILE.tmp" "$FEEDBACK_FILE"
+  fi
+fi
 
-jq --argjson new "$NEW" \
-  '. + ($new | map({(.id): .updatedAt}) | add)' \
-  "$ANNOUNCED_FILE" > "$ANNOUNCED_FILE.tmp" && \
-  mv "$ANNOUNCED_FILE.tmp" "$ANNOUNCED_FILE"
+# Early-exit only if BOTH are empty.
+if [ "$NEW_COUNT" = "0" ] && [ "$NEW_FEEDBACK_COUNT" = "0" ]; then
+  exit 0
+fi
 
 UPDATE_NAG=""
 if [ -n "$LATEST_VERSION" ] && [ "$PLUGIN_VERSION" != "unknown" ] && [ "$PLUGIN_VERSION" != "$LATEST_VERSION" ]; then
@@ -138,9 +168,11 @@ if [ -n "$LATEST_VERSION" ] && [ "$PLUGIN_VERSION" != "unknown" ] && [ "$PLUGIN_
 Run: /plugin marketplace update hypertask"
 fi
 
-TITLES=$(echo "$NEW" | jq -r '.[] | "  - \"\(.title)\" (task_id: \(.id))"')
-cat <<EOF
-<system-reminder>
+printf '%s\n' "<system-reminder>"
+
+if [ "$NEW_COUNT" != "0" ]; then
+  TITLES=$(echo "$NEW" | jq -r '.[] | "  - \"\(.title)\" (task_id: \(.id))"')
+  cat <<EOF
 hypertask: $NEW_COUNT pending task(s) assigned to Claude:
 $TITLES
 $UPDATE_NAG
@@ -172,6 +204,29 @@ The server opens a GitHub PR from the pushed branch. Merge/close happens
 in GitHub — do NOT merge or remove the worktree yourself.
 
 On failure: same URL, body {"status":"failed","summary":"<reason>"}.
-</system-reminder>
 EOF
+fi
+
+if [ "$NEW_FEEDBACK_COUNT" != "0" ]; then
+  if [ "$NEW_COUNT" != "0" ]; then
+    printf '\n'
+  fi
+  FEEDBACK_LINES=$(echo "$NEW_FEEDBACK" | jq -r '.[] | "  - \"\(.taskTitle)\" (task_id: \(.taskId), PR #\(.prNumber), feedback at \(.lastFeedbackAt))"')
+  cat <<EOF
+hypertask: $NEW_FEEDBACK_COUNT task(s) with new PR feedback waiting:
+$FEEDBACK_LINES
+
+Per the task-studio skill Rule 5.5, offer to iterate — but only after
+you finish whatever the user is currently asking about.
+
+To iterate, re-claim the task (same claim POST as usual). The response
+will include \`previousDispatch\` with the existing branchName, worktreePath,
+and prNumber — see Rule 0 for how to reuse them in a new worktree attempt.
+Before touching code, fetch the feedback:
+  curl -sS "\$HYPERTASK_URL/api/local/tasks/<task_id>/pr-feedback" \\
+    -H "Authorization: Bearer \$HYPERTASK_TOKEN"
+EOF
+fi
+
+printf '%s\n' "</system-reminder>"
 exit 0
