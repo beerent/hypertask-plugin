@@ -68,14 +68,23 @@ by the hypertask-peek hook on each user turn. When you see one:
 
    On failure, post `{"status":"failed","summary":"<reason>"}` (branch/worktree fields are optional when failing).
 
-6. **Handle worktree cleanup reminders.** The peek hook will sometimes inject a `hypertask cleanup:` block listing worktrees you previously created whose tasks are now resolved (approved → complete, or acknowledged-after-failure → backlog). For EACH entry:
+6. **Handle worktree cleanup reminders.** The peek hook will sometimes inject a `hypertask cleanup:` block listing worktrees the user previously created whose tasks are now resolved (approved → complete, or acknowledged-after-failure → backlog). The user clicking **Approve** in the web UI is itself the consent — do not ask again before merging or cleaning up. Do this work proactively. For EACH entry, run the steps below in order; if any rail trips, REFUSE cleanup for that entry, surface the reason, and move on. The next prompt will re-emit the reminder once the user fixes things.
 
-   1. **Verify the worktree is clean.** Run `git -C <worktreePath> status --porcelain`. If the output is non-empty, REFUSE cleanup for that entry. Tell the user the worktree has leftover changes and that they should review them first.
-   2. **Verify the branch is merged into main.** Run `git merge-base --is-ancestor <branchName> main` (or whatever the project's default branch is — judge from `git symbolic-ref refs/remotes/origin/HEAD` if unsure). If it returns non-zero, the branch was approved but never merged. Offer to run `git merge <branchName>` from main first; only proceed with the cleanup after explicit user consent.
-   3. **Remove the worktree.** Run `git worktree remove <worktreePath>`. **Never** pass `--force`. If git refuses, surface the exact error to the user verbatim.
-   4. **Do NOT delete the branch ref** (`git branch -D`) unless the user explicitly asks for it. Some users want the branch in `git log` history.
+   1. **Verify the worktree has no uncommitted changes.** Run `git -C <worktreePath> status --porcelain`. If non-empty, refuse with "leftover changes in `<worktreePath>` — review them before re-approving cleanup."
+   2. **Locate and verify the main checkout.** The worktree path is `<main>/.worktrees/claude-<short>`, so `<main>` is the parent of the parent. In the main checkout, run `git symbolic-ref refs/remotes/origin/HEAD --short` (strip the `origin/` prefix) to discover the project's default branch, and `git -C <main> symbolic-ref --short HEAD` to see what's currently checked out. If they don't match, refuse: "main checkout is on `<X>`, expected `<default>` — switch back before re-approving cleanup." Then `git -C <main> status --porcelain` must be empty; otherwise refuse with "main checkout has uncommitted changes."
+   3. **Merge the branch into main.** In the main checkout, run `git merge --no-ff <branchName>`. If git reports a conflict, run `git merge --abort` and refuse with "merge conflict on `<branchName>` — resolve manually before re-approving cleanup." On success, do NOT push.
+   4. **Remove the worktree.** Run `git worktree remove <worktreePath>` (never `--force`). If git refuses, surface the exact error verbatim.
+   5. **Acknowledge the cleanup with the server** so peek doesn't re-announce this entry to other Claude windows:
 
-   Do this work proactively when you see the cleanup block — you don't need to ask for permission for the cleanup itself (the user already approved or acknowledged the task), but you DO need to ask before any merge step. Surface what you cleaned up (or refused to clean up, and why) in your reply.
+      ```bash
+      curl -sS -X POST "$HYPERTASK_URL/api/local/tasks/<task_id>/cleaned" \
+        -H "Authorization: Bearer $HYPERTASK_TOKEN"
+      ```
+
+      The endpoint is idempotent — re-posting is harmless.
+   6. **Do NOT delete the branch ref** (`git branch -D`) unless the user explicitly asks for it.
+
+   Surface what you did (or refused to do, and why) in plain language in your reply: which worktrees were merged + cleaned, and which were skipped with the rail that tripped.
 
 7. **If the user says skip/not now**, do nothing. The hook will not re-announce
    this dispatch in the current session. To revisit later, the user can ask
