@@ -1,7 +1,7 @@
 {
   "name": "hypertask-local",
   "description": "Surface tasks queued from hypertask.app in your local Claude Code session — claim atomically across multiple windows, never interrupt in-progress work.",
-  "version": "1.0.4",
+  "version": "2.0.0",
   "author": {
     "name": "hypertask"
   },

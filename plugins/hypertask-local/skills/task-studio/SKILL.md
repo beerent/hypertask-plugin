@@ -26,8 +26,6 @@ by the hypertask-peek hook on each user turn. When you see one:
 
    **Exception:** if the task is pure research, documentation outside the repo, communication (email/Slack/etc), or any work that doesn't modify files in the repo, skip the worktree. Judge per task.
 
-   **Never `git push` the branch.** Leave it local. The user decides when and whether to push, merge, or PR.
-
 1. **NEVER interrupt in-progress work.** If the user asked you to do something
    in this turn, do that thing FIRST. Mention queued tasks only AFTER you've
    finished responding to what the user actually asked. The queue is not an
@@ -57,38 +55,33 @@ by the hypertask-peek hook on each user turn. When you see one:
 
    If you get HTTP 409, tell the user "looks like another window already grabbed it" (or "the task isn't in the queue anymore") and continue with whatever you were doing. Do not retry.
 
-5. **On a successful claim**, the response includes the full task payload (`{task, dispatch}`). Work the task inside the worktree you created in rule 0. Commit your work to the branch. When done, POST to the task's complete endpoint:
+5. **On a successful claim**, the response includes the full task payload (`{task, dispatch}`). Work the task inside the worktree you created in rule 0. Commit your work to the branch. When the work is done and tests pass, **push the branch to origin** and then POST to the task's complete endpoint:
 
    ```bash
+   # Inside the worktree:
+   git push -u origin "$BRANCH"
+
    curl -sS -X POST "$HYPERTASK_URL/api/local/tasks/<task_id>/complete" \
      -H "Authorization: Bearer $HYPERTASK_TOKEN" \
      -H "Content-Type: application/json" \
      -d "{\"status\":\"complete\",\"summary\":\"<one paragraph of what you did>\",\"branchName\":\"$BRANCH\",\"worktreePath\":\"$WORKTREE\"}"
    ```
 
-   On failure, post `{"status":"failed","summary":"<reason>"}` (branch/worktree fields are optional when failing).
+   The server will automatically open a GitHub pull request from your pushed branch against the project's default branch. The Review card in hypertask will show the PR link, and a GitHub webhook will transition the task's status when the PR is merged (→ complete) or closed without merging (→ backlog, unassigning Claude).
 
-6. **Handle worktree cleanup reminders.** The peek hook will sometimes inject a `hypertask cleanup:` block listing worktrees the user previously created whose tasks are now resolved (approved → complete, or acknowledged-after-failure → backlog). The user clicking **Approve** in the web UI is itself the consent — do not ask again before merging or cleaning up. Do this work proactively. For EACH entry, run the steps below in order; if any rail trips, REFUSE cleanup for that entry, surface the reason, and move on. The next prompt will re-emit the reminder once the user fixes things.
+   **You do NOT merge the branch yourself.** Review and merge happen in GitHub. Do not `git merge`, do not `git worktree remove`, do not do any cleanup — the user (or an automated cleanup pass on a future peek) will handle stale worktrees locally when GitHub has deleted the remote branch.
 
-   1. **Verify the worktree has no uncommitted changes.** Run `git -C <worktreePath> status --porcelain`. If non-empty, refuse with "leftover changes in `<worktreePath>` — review them before re-approving cleanup."
-   2. **Locate and verify the main checkout.** The worktree path is `<main>/.worktrees/claude-<short>`, so `<main>` is the parent of the parent. In the main checkout, run `git symbolic-ref refs/remotes/origin/HEAD --short` (strip the `origin/` prefix) to discover the project's default branch, and `git -C <main> symbolic-ref --short HEAD` to see what's currently checked out. If they don't match, refuse: "main checkout is on `<X>`, expected `<default>` — switch back before re-approving cleanup." Then `git -C <main> status --porcelain` must be empty; otherwise refuse with "main checkout has uncommitted changes."
-   3. **Merge the branch into main.** In the main checkout, run `git merge --no-ff <branchName>`. If git reports a conflict, run `git merge --abort` and refuse with "merge conflict on `<branchName>` — resolve manually before re-approving cleanup." On success, do NOT push.
-   4. **Remove the worktree.** Run `git worktree remove <worktreePath>` (never `--force`). If git refuses, surface the exact error verbatim.
-   5. **Acknowledge the cleanup with the server** so peek doesn't re-announce this entry to other Claude windows:
+   If the push fails (no network, no remote, permission denied), surface the error to the user and still POST `/complete` with branch info — the server will log the PR-open failure and fall back to the manual Approve/Reject review card so nothing is lost.
 
-      ```bash
-      curl -sS -X POST "$HYPERTASK_URL/api/local/tasks/<task_id>/cleaned" \
-        -H "Authorization: Bearer $HYPERTASK_TOKEN"
-      ```
+   **On failure**, post `{"status":"failed","summary":"<reason>"}` (branch/worktree fields are optional when failing).
 
-      The endpoint is idempotent — re-posting is harmless.
-   6. **Do NOT delete the branch ref** (`git branch -D`) unless the user explicitly asks for it.
-
-   Surface what you did (or refused to do, and why) in plain language in your reply: which worktrees were merged + cleaned, and which were skipped with the rail that tripped.
-
-7. **If the user says skip/not now**, do nothing. The hook will not re-announce
+6. **If the user says skip/not now**, do nothing. The hook will not re-announce
    this dispatch in the current session. To revisit later, the user can ask
    "what's in my hypertask queue?" and only then may you do a one-shot peek.
+
+## Opt-in continuous mode
+
+If the user explicitly asks to "start listening", "drain the queue", "turn listen mode on", or similar, switch to the sibling `listen-mode` skill. That skill temporarily overrides rules 2 and 3 (allowing direct peeks and auto-claims without per-task confirmation) for the duration of the drain, while keeping every other rule in place — especially Rule 0 (fresh worktree per task) and Rule 4 (atomic claim). Default ambient behavior resumes the moment listen-mode exits.
 
 ## Why these rules
 
@@ -101,3 +94,7 @@ by the hypertask-peek hook on each user turn. When you see one:
   accompli.
 - Rule 4's atomic semantics exist because there may be multiple Claude Code
   windows in the same repo. The server guarantees only one can claim.
+- Rule 5's "push + let the server open a PR" exists because merge decisions
+  belong in GitHub, not in a shell script. The PR becomes the durable review
+  artifact: CI runs, teammates can comment, merge policy applies, and the
+  pull_request webhook closes the hypertask loop automatically.
