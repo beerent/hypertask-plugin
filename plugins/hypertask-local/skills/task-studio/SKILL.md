@@ -68,7 +68,16 @@ by the hypertask-peek hook on each user turn. When you see one:
 
    On failure, post `{"status":"failed","summary":"<reason>"}` (branch/worktree fields are optional when failing).
 
-6. **If the user says skip/not now**, do nothing. The hook will not re-announce
+6. **Handle worktree cleanup reminders.** The peek hook will sometimes inject a `hypertask cleanup:` block listing worktrees you previously created whose tasks are now resolved (approved → complete, or acknowledged-after-failure → backlog). For EACH entry:
+
+   1. **Verify the worktree is clean.** Run `git -C <worktreePath> status --porcelain`. If the output is non-empty, REFUSE cleanup for that entry. Tell the user the worktree has leftover changes and that they should review them first.
+   2. **Verify the branch is merged into main.** Run `git merge-base --is-ancestor <branchName> main` (or whatever the project's default branch is — judge from `git symbolic-ref refs/remotes/origin/HEAD` if unsure). If it returns non-zero, the branch was approved but never merged. Offer to run `git merge <branchName>` from main first; only proceed with the cleanup after explicit user consent.
+   3. **Remove the worktree.** Run `git worktree remove <worktreePath>`. **Never** pass `--force`. If git refuses, surface the exact error to the user verbatim.
+   4. **Do NOT delete the branch ref** (`git branch -D`) unless the user explicitly asks for it. Some users want the branch in `git log` history.
+
+   Do this work proactively when you see the cleanup block — you don't need to ask for permission for the cleanup itself (the user already approved or acknowledged the task), but you DO need to ask before any merge step. Surface what you cleaned up (or refused to clean up, and why) in your reply.
+
+7. **If the user says skip/not now**, do nothing. The hook will not re-announce
    this dispatch in the current session. To revisit later, the user can ask
    "what's in my hypertask queue?" and only then may you do a one-shot peek.
 
