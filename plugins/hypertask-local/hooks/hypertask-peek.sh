@@ -76,39 +76,49 @@ RESPONSE=$(curl -sS --max-time 1 \
   -H "X-Hypertask-Plugin-Platform: $PLUGIN_PLATFORM" \
   "$HYPERTASK_URL/api/local/peek?repo=$REPO_ENC" 2>/dev/null) || exit 0
 
-# Validate JSON shape.
-COUNT=$(echo "$RESPONSE" | jq -r '.dispatches | length' 2>/dev/null) || exit 0
+# --- parse tasks from response ---
+COUNT=$(echo "$RESPONSE" | jq -r '.tasks | length' 2>/dev/null) || exit 0
 
-# Read latest version from response for the update nag (may be null/missing
-# if the server hasn't been upgraded yet — treat as "no update available").
+# Read latest version for the update nag.
 LATEST_VERSION=$(echo "$RESPONSE" | jq -r '.latestPluginVersion // empty' 2>/dev/null || echo "")
 
 if [ "$COUNT" = "0" ] || [ -z "$COUNT" ]; then
   exit 0
 fi
 
-# Per-session announce-state file.
+# --- announce state: {task_id: iso-timestamp} ---
 STATE_DIR="$HOME/.claude/hypertask"
 mkdir -p "$STATE_DIR" 2>/dev/null || exit 0
 STATE_FILE="$STATE_DIR/announced-$CLAUDE_SESSION_ID.json"
-[ -f "$STATE_FILE" ] || echo "[]" > "$STATE_FILE"
+[ -f "$STATE_FILE" ] || echo "{}" > "$STATE_FILE"
 
-# Filter out dispatches we've already announced in this session.
+# Migrate legacy array-format state files (from v1.0.1) to the new
+# object format. On first encounter with an array, reset to empty.
+FIRST_CHAR=$(head -c 1 "$STATE_FILE" 2>/dev/null)
+if [ "$FIRST_CHAR" = "[" ]; then
+  echo "{}" > "$STATE_FILE"
+fi
+
+# Filter to tasks that are NEW or have a newer updatedAt than what we've
+# seen for this task id in the state file. The slurpfile reads the state
+# file as a single JSON object; for each task in the response, we compare
+# its updatedAt to the value keyed by its id.
 NEW=$(jq --slurpfile seen "$STATE_FILE" \
-  '.dispatches | map(select(.id as $id | ($seen[0] | index($id) | not)))' \
-  <<<"$RESPONSE")
+  '.tasks | map(select(
+    .id as $id
+    | .updatedAt as $u
+    | ($seen[0][$id] // "") < $u
+  ))' <<<"$RESPONSE")
 
 NEW_COUNT=$(echo "$NEW" | jq 'length')
 [ "$NEW_COUNT" = "0" ] && exit 0
 
-# Append the new ids to state.
-jq --argjson new "$NEW" '. + ($new | map(.id))' "$STATE_FILE" > "$STATE_FILE.tmp" \
-  && mv "$STATE_FILE.tmp" "$STATE_FILE"
+# Update the state file with the new (id, updatedAt) pairs.
+jq --argjson new "$NEW" \
+  '. + ($new | map({(.id): .updatedAt}) | add)' \
+  "$STATE_FILE" > "$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
 
-# Build the update-nag line if server reports a newer version.
-# Simple string inequality — don't try to parse semver in shell. If the
-# user is on an unexpectedly-new version, the nag fires once and is
-# harmless; normally the server is always at or ahead of the user.
+# --- update nag ---
 UPDATE_NAG=""
 if [ -n "$LATEST_VERSION" ] && [ "$PLUGIN_VERSION" != "unknown" ] && [ "$PLUGIN_VERSION" != "$LATEST_VERSION" ]; then
   UPDATE_NAG="
@@ -116,18 +126,14 @@ if [ -n "$LATEST_VERSION" ] && [ "$PLUGIN_VERSION" != "unknown" ] && [ "$PLUGIN_
 Run: /plugin marketplace update hypertask"
 fi
 
-# Print the system reminder.
-# We emit an explicit curl template (with the Authorization header) rather
-# than describing the API abstractly, because without the header Claude's
-# first claim call 401s and has to retry — a wasted round-trip the user
-# sees as a broken "first attempt." $HYPERTASK_URL and $HYPERTASK_TOKEN
-# are escaped as literal shell-variable references so Claude runs them
-# through its own shell at curl time (both are already exported in the
-# shell that launched Claude Code).
-TITLES=$(echo "$NEW" | jq -r '.[] | "  - \"\(.title)\" (dispatch_id: \(.id))"')
+# --- emit system-reminder ---
+# Both $HYPERTASK_URL and $HYPERTASK_TOKEN are left as literal shell
+# variable references (escaped in the heredoc) so Claude's own shell
+# expands them at curl time — token never lands in the reminder text.
+TITLES=$(echo "$NEW" | jq -r '.[] | "  - \"\(.title)\" (task_id: \(.id))"')
 cat <<EOF
 <system-reminder>
-hypertask: $NEW_COUNT pending task(s) sent to your local queue:
+hypertask: $NEW_COUNT pending task(s) assigned to Claude:
 $TITLES
 $UPDATE_NAG
 
@@ -135,15 +141,25 @@ Per the task-studio skill, offer to pick these up — but ONLY after you finish
 whatever the user is currently asking about. Never abandon in-progress work.
 
 To claim a task, run:
-  curl -sS -X POST "\$HYPERTASK_URL/api/local/<dispatch_id>/claim" \\
+  curl -sS -X POST "\$HYPERTASK_URL/api/local/tasks/<task_id>/claim" \\
     -H "Authorization: Bearer \$HYPERTASK_TOKEN" \\
     -H "Content-Type: application/json" \\
     -d '{"sessionId":"$CLAUDE_SESSION_ID"}'
 
-On success the response body is {dispatch, task} with the full task payload.
-When done, POST the same way to .../complete with body:
-  {"status":"complete","summary":"<one paragraph of what you did>"}
-On failure: {"status":"failed","summary":"<reason>"}.
+Before touching any files, create a fresh worktree for this task:
+  SHORT=\$(echo <task_id> | cut -c1-6)
+  SLUG=\$(echo "<task title>" | tr '[:upper:] ' '[:lower:]-' | sed 's/[^a-z0-9-]//g' | cut -c1-40)
+  git worktree add -b "claude/\${SLUG}-\${SHORT}" ".worktrees/claude-\${SHORT}"
+  cd ".worktrees/claude-\${SHORT}"
+  # ... do your work in this worktree, commit to the branch, do NOT push ...
+
+When done, POST to complete:
+  curl -sS -X POST "\$HYPERTASK_URL/api/local/tasks/<task_id>/complete" \\
+    -H "Authorization: Bearer \$HYPERTASK_TOKEN" \\
+    -H "Content-Type: application/json" \\
+    -d '{"status":"complete","summary":"<what you did>","branchName":"claude/\${SLUG}-\${SHORT}","worktreePath":".worktrees/claude-\${SHORT}"}'
+
+On failure: same URL, body {"status":"failed","summary":"<reason>"}.
 </system-reminder>
 EOF
 exit 0
