@@ -68,3 +68,27 @@ The plugin reports its installed version to hypertask on every peek — you can 
 - **The hook is slow.** It hard-times-out at 1s. If your hypertask server is consistently slower than that, raise `--max-time` in the script or run hypertask locally.
 - **Same task announced in 5 windows.** Expected; bounded to once per window per session. If this is annoying, close the windows you're not using.
 - **Update nag keeps appearing.** Run `/plugin marketplace update hypertask` followed by `/plugin update hypertask-local` in Claude Code, then restart.
+
+## Smoke-testing artifact upload
+
+To verify the `/complete` multipart path works against a local hypertask
+without running the full skill loop, you can curl it directly. Replace
+`<task-id>` with a pending-task id the server shows you:
+
+```bash
+TOKEN=$HYPERTASK_TOKEN  # from your shell env
+TASK=<task-id>
+curl -sS -X POST "$HYPERTASK_URL/api/local/tasks/$TASK/complete" \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "status=complete" \
+  -F "summary=smoke test" \
+  -F "branchName=smoke/test" \
+  -F "worktreePath=/tmp" \
+  -F "image_0=@/path/to/any/image.png" \
+  -F 'imageCaptions=["smoke"]' \
+  -F 'textArtifacts=[{"title":"smoke","body":"it works"}]'
+```
+
+The response should be `200` with `{task, dispatch}`. Inspect the
+opened PR body in GitHub — it should include a `## Proof` section
+with your image and the text block.
