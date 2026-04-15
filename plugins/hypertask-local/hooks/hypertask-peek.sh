@@ -197,8 +197,13 @@ When done, PUSH the branch and POST /complete:
   git push -u origin "claude/\${SLUG}-\${SHORT}"
   curl -sS -X POST "\$HYPERTASK_URL/api/local/tasks/<task_id>/complete" \\
     -H "Authorization: Bearer \$HYPERTASK_TOKEN" \\
-    -H "Content-Type: application/json" \\
-    -d '{"status":"complete","summary":"<what you did>","branchName":"claude/\${SLUG}-\${SHORT}","worktreePath":".worktrees/claude-\${SHORT}"}'
+    -F "status=complete" \\
+    -F "summary=<what you did>" \\
+    -F "branchName=claude/\${SLUG}-\${SHORT}" \\
+    -F "worktreePath=.worktrees/claude-\${SHORT}" \\
+    -F "image_0=@/tmp/hypertask-proof-<task_id>/0.png" \\
+    -F 'imageCaptions=["<caption>"]' \\
+    -F 'textArtifacts=[{"title":"pnpm test","body":"✓ passed","lang":"text"}]'
 
 The server opens a GitHub PR from the pushed branch. Merge/close happens
 in GitHub — do NOT merge or remove the worktree yourself.
