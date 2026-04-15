@@ -152,6 +152,11 @@ by the hypertask-peek hook on each user turn. When you see one:
 
       Respond to every actionable item across all three.
    4. Make the changes inside the new worktree, run tests, commit.
+   4a. **Re-capture proof of this iteration (required).** The server's
+       `/iterated` endpoint now enforces the same at-least-one-artifact
+       rule as `/complete`. Repeat the capture loop from Phase 5a against
+       the iterated branch; save PNGs to a fresh
+       `/tmp/hypertask-proof-<taskid>-<attempt>/` dir.
    5. Push the existing branch (already tracked — no `-u`):
 
       ```bash
@@ -162,7 +167,10 @@ by the hypertask-peek hook on each user turn. When you see one:
 
       ```bash
       curl -sS -X POST "$HYPERTASK_URL/api/local/tasks/<task_id>/iterated" \
-        -H "Authorization: Bearer $HYPERTASK_TOKEN"
+        -H "Authorization: Bearer $HYPERTASK_TOKEN" \
+        -F "image_0=@/tmp/hypertask-proof-<taskid>-<attempt>/0.png" \
+        -F 'imageCaptions=["After iteration: <what changed>"]' \
+        -F 'textArtifacts=[{"title":"pnpm test","body":"✓ 47 passed","lang":"text"}]'
       ```
 
    **Do NOT call `/complete`.** The task is already in Review. Your push updates the existing PR — the reviewer sees the new commits and can approve or leave more comments. Only call `/complete` if you've explicitly abandoned this attempt (rare).
