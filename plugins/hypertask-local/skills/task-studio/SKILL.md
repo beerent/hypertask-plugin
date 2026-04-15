@@ -68,7 +68,48 @@ by the hypertask-peek hook on each user turn. When you see one:
 
    If you get HTTP 409, tell the user "looks like another window already grabbed it" (or "the task isn't in the queue anymore") and continue with whatever you were doing. Do not retry.
 
-5. **On a successful claim**, the response includes the full task payload (`{task, dispatch}`). Work the task inside the worktree you created in rule 0. Commit your work to the branch. When the work is done and tests pass, **push the branch to origin** and then POST to the task's complete endpoint:
+5. **On a successful claim**, the response includes the full task payload (`{task, dispatch}`). Work the task inside the worktree you created in rule 0. Commit your work to the branch.
+
+   **5a. Capture proof of the running change (required).** Hypertask
+   requires at least one artifact — screenshot or text block — on every
+   `complete` outcome. Pick the mode per task:
+
+   - *UI / visual change* → screenshots via Playwright MCP. Prefer a
+     before/after pair for modifications; one frame is fine for a
+     net-new view.
+   - *Backend / API / CLI / infra / data* → text block(s) of relevant
+     command output (test run, `curl`, migration dry-run), trimmed and
+     titled clearly.
+   - *Pure refactor* → minimum: a text block showing the test suite
+     passing, titled "Existing behavior preserved — <suite> output."
+
+   **Capture loop for UI tasks (from inside the worktree):**
+
+   ```bash
+   pnpm install --frozen-lockfile
+   PORT=$(node -e "require('net').createServer().listen(0,function(){console.log(this.address().port);this.close()})")
+   PORT=$PORT pnpm dev > /tmp/hypertask-dev-$$.log 2>&1 &
+   DEV_PID=$!
+   trap 'kill $DEV_PID 2>/dev/null' EXIT
+   for i in $(seq 1 60); do
+     curl -sf "http://localhost:$PORT/" >/dev/null && break
+     sleep 1
+   done
+   # Use Playwright MCP tools to navigate + take screenshots.
+   # Save PNGs to /tmp/hypertask-proof-<taskid>/
+   kill $DEV_PID
+   ```
+
+   **If the capture fails** (install fails, dev server won't boot, auth
+   blocks Playwright): fall back to a text artifact describing the
+   failure (include the tail of `/tmp/hypertask-dev-*.log` when
+   relevant) and proceed. The requirement is "an artifact," not a
+   specific kind.
+
+   **Auth-protected apps:** check memory for saved test credentials
+   before giving up.
+
+   When the work is done and tests pass, **push the branch to origin** and then POST to the task's complete endpoint:
 
    ```bash
    # Inside the worktree:
@@ -76,8 +117,14 @@ by the hypertask-peek hook on each user turn. When you see one:
 
    curl -sS -X POST "$HYPERTASK_URL/api/local/tasks/<task_id>/complete" \
      -H "Authorization: Bearer $HYPERTASK_TOKEN" \
-     -H "Content-Type: application/json" \
-     -d "{\"status\":\"complete\",\"summary\":\"<one paragraph of what you did>\",\"branchName\":\"$BRANCH\",\"worktreePath\":\"$WORKTREE\"}"
+     -F "status=complete" \
+     -F "summary=<what you did>" \
+     -F "branchName=$BRANCH" \
+     -F "worktreePath=$WORKTREE" \
+     -F "image_0=@/tmp/hypertask-proof-<taskid>/0.png" \
+     -F "image_1=@/tmp/hypertask-proof-<taskid>/1.png" \
+     -F 'imageCaptions=["Before: ...","After: ..."]' \
+     -F 'textArtifacts=[{"title":"pnpm test","body":"✓ 47 passed","lang":"text"}]'
    ```
 
    The server will automatically open a GitHub pull request from your pushed branch against the project's default branch. The Review card in hypertask will show the PR link, and a GitHub webhook will transition the task's status when the PR is merged (→ complete) or closed without merging (→ backlog, unassigning Claude).
