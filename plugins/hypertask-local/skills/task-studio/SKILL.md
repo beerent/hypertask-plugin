@@ -74,14 +74,23 @@ by the hypertask-peek hook on each user turn. When you see one:
    requires at least one artifact — screenshot or text block — on every
    `complete` outcome. Pick the mode per task:
 
-   - *UI / visual change* → screenshots via Playwright MCP. Prefer a
-     before/after pair for modifications; one frame is fine for a
-     net-new view.
+   - *UI / visual change* → screenshots via the bundled `playwright-proof`
+     MCP. Prefer a before/after pair for modifications; one frame is
+     fine for a net-new view.
    - *Backend / API / CLI / infra / data* → text block(s) of relevant
      command output (test run, `curl`, migration dry-run), trimmed and
      titled clearly.
    - *Pure refactor* → minimum: a text block showing the test suite
      passing, titled "Existing behavior preserved — <suite> output."
+
+   **Use the bundled `playwright-proof` MCP for screenshots.** This
+   plugin ships its own Playwright MCP server (distinct from the
+   official `playwright` plugin) launched with `--isolated --headless`
+   so it never conflicts with a browser the user has open and always
+   produces a capturable frame — even when other Claude Code windows
+   are running Playwright in parallel. Prefer its
+   `mcp__plugin_hypertask-local_playwright-proof__browser_*` tools
+   over the official Playwright plugin's tools for proof capture.
 
    **Capture loop for UI tasks (from inside the worktree):**
 
@@ -95,7 +104,7 @@ by the hypertask-peek hook on each user turn. When you see one:
      curl -sf "http://localhost:$PORT/" >/dev/null && break
      sleep 1
    done
-   # Use Playwright MCP tools to navigate + take screenshots.
+   # Call the bundled playwright-proof MCP tools to navigate + screenshot.
    # Save PNGs to /tmp/hypertask-proof-<taskid>/
    kill $DEV_PID
    ```
